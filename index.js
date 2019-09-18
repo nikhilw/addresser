@@ -1,6 +1,6 @@
-var usStates = require('./data/us-states.json');
+var usStates = require('./data/states.json');
 var usStreetTypes = require('./data/us-street-types.json');
-var usCities = require('./data/us-cities.json');
+var usCities = require('./data/cities.json');
 
 'use strict';
 
@@ -77,7 +77,8 @@ var usLine2Prefixes = {
     'TRLR'      : 'TRLR',
     'UNIT'      :	'UNIT',
     'UPPER'     : 'UPPR',
-    'UPPR'      : 'UPPR'
+    'UPPR'      : 'UPPR',
+    '#'         : '#',
 }
 
 module.exports = {
@@ -95,7 +96,7 @@ module.exports = {
 
     // Check if the last section contains country reference (Just supports US for now)
     var countrySection = addressParts[addressParts.length-1].trim();
-    if (countrySection === 'US' || countrySection === 'USA' || countrySection === 'United States') {
+    if (countrySection === 'US' || countrySection === 'USA' || countrySection === 'United States' || countrySection === 'Canada') {
       addressParts.splice(-1,1);
     }
     
@@ -110,6 +111,9 @@ module.exports = {
       result.zipCode = zipString.substring(0,5);
       result.zipCodePlusFour = zipString;
       stateString = stateString.substring(0, stateString.length - 10).trim();
+    } else if(stateString.match(/[A-Z]\d[A-Z] ?\d[A-Z]\d/)){
+      result.zipCode = stateString.match(/[A-Z]\d[A-Z] ?\d[A-Z]\d/)[0];
+      stateString = stateString.substring(0, stateString.length - result.zipCode.length).trim();
     }
     // Parse and remove state
     if (stateString.length > 0) { // Check if anything is left of last section
@@ -160,7 +164,7 @@ module.exports = {
       }
     });
     if (!result.placeName) {
-      result.placeName = placeString;
+      result.placeName = toTitleCase(placeString);
       placeString = "";
     }
     
@@ -204,7 +208,36 @@ module.exports = {
         Object.keys(usStreetTypes).join('|') + ')\\b\\.?' + 
         '( +(?:' + usStreetDirectionalString + ')\\b)?', 'i');
       var rePO = new RegExp('(P\\.?O\\.?|POST\\s+OFFICE)\\s+(BOX|DRAWER)\\s\\w+', 'i');
-      if (streetString.match(reStreet)) {
+      var reAveLetter = new RegExp('\.\*\\b(ave.?|avenue)\.\*\\b[a-zA-Z]\\b', 'i');
+      var reNoSuffix = new RegExp('\\b\\d+\\s[a-zA-Z0-9_ ]+\\b', 'i');
+      if (streetString.match(reAveLetter)) {
+        result.addressLine1 = streetString.match(reAveLetter)[0];
+        streetString = streetString.replace(reAveLetter,"").trim(); // Carve off the first address line
+        if (streetString && streetString.length > 0) {
+          // Check if line2 data was already parsed
+          if (result.hasOwnProperty('addressLine2') && result.addressLine2.length > 0) {
+            throw 'Can not parse address. Too many address lines. Input string: ' + address;
+          } else {
+            result.addressLine2 = streetString;
+          }
+        }
+        
+        var streetParts = result.addressLine1.split(' ');
+    
+        // Assume type is last and number is first   
+        result.streetNumber = streetParts[0]; // Assume number is first element
+
+        // Normalize to Ave
+        streetParts[streetParts.length-2] = streetParts[streetParts.length-2].replace(/^(ave.?|avenue)$/i, 'Ave');
+
+        //result.streetSuffix = toTitleCase(usStreetTypes[streetParts[streetParts.length-1].toLowerCase()]);
+        result.streetName = streetParts[1]; // Assume street name is everything in the middle
+        for (var i = 2; i <= streetParts.length-1; i++) {
+          result.streetName = result.streetName + " " + streetParts[i];
+        }
+        result.streetName = toTitleCase(result.streetName);
+        result.addressLine1 = [result.streetNumber, result.streetName].join(" ");
+      } else if (streetString.match(reStreet)) {
         result.addressLine1 = streetString.match(reStreet)[0];
         streetString = streetString.replace(reStreet,"").trim(); // Carve off the first address line
         if (streetString && streetString.length > 0) {
@@ -225,22 +258,46 @@ module.exports = {
         
         // Assume type is last and number is first   
         result.streetNumber = streetParts[0]; // Assume number is first element
-
-        // Remove '.' if it follows streetSuffix
-        streetParts[streetParts.length-1] = streetParts[streetParts.length-1].replace(/\.$/, '');
-        result.streetSuffix = toTitleCase(usStreetTypes[streetParts[streetParts.length-1].toLowerCase()]);
+        
+        // If there are only 2 street parts (number and name) then its likely missing a "real" suffix and the street name just happened to match a suffix
+        if (streetParts.length > 2) {
+          // Remove '.' if it follows streetSuffix
+          streetParts[streetParts.length-1] = streetParts[streetParts.length-1].replace(/\.$/, '');
+          result.streetSuffix = toTitleCase(usStreetTypes[streetParts[streetParts.length-1].toLowerCase()]);
+        }
+        
         result.streetName = streetParts[1]; // Assume street name is everything in the middle
         for (var i = 2; i < streetParts.length-1; i++) {
           result.streetName = result.streetName + " " + streetParts[i];
         }
         result.streetName = toTitleCase(result.streetName);
-        result.addressLine1 = [result.streetNumber, result.streetName, result.streetSuffix].join(" ");
+        result.addressLine1 = [result.streetNumber, result.streetName].join(" ");
+        
+        if (result.hasOwnProperty('streetSuffix')) {
+          result.addressLine1 = result.addressLine1 + ' ' + result.streetSuffix;
+        }
         if (result.streetDirection) {
           result.addressLine1 = result.addressLine1 + ' ' + result.streetDirection;
         }
       } else if (streetString.match(rePO)) {
         result.addressLine1 = streetString.match(rePO)[0];
         streetString = streetString.replace(rePO,"").trim(); // Carve off the first address line
+      } else if (streetString.match(reNoSuffix)) {
+        // Check for a line2 prefix followed by a single word. If found peel that off as addressLine2
+        var reLine2 = new RegExp('\\s(' + usLine2String + ')\\.?\\s[a-zA-Z0-9_\-]+$','i');
+        if (streetString.match(reLine2)) {
+          result.addressLine2 = streetString.match(reLine2)[0].trim();
+          streetString = streetString.replace(reLine2,"").trim(); // Carve off the first address line
+        }
+        
+        result.addressLine1 = streetString.match(reNoSuffix)[0];
+        streetString = streetString.replace(reNoSuffix,"").trim(); // Carve off the first address line
+        var streetParts = result.addressLine1.split(' ');
+    
+        // Assume type is last and number is first   
+        result.streetNumber = streetParts[0]; // Assume number is first element
+        streetParts.shift(); // Remove the first element
+        result.streetName = streetParts.join(' '); // Assume street name is everything else
       } else {
         throw 'Can not parse address. Invalid street address data. Input string: ' + address;
       }
@@ -252,8 +309,10 @@ module.exports = {
     if (result.hasOwnProperty('addressLine2')) {
       addressString += ' ' + result.addressLine2;
     }
-    var idString = addressString + ", " + result.placeName + ", " + result.stateAbbreviation + " " + result.zipCode;
-    result['id'] = encodeURI(idString.replace(/ /g, '-').replace(/\#/g, '-').replace(/\//g, '-').replace(/\./g, '-'));
+    if (addressString && result.hasOwnProperty("placeName") && result.hasOwnProperty("stateAbbreviation") && result.hasOwnProperty("zipCode")) {
+      var idString = addressString + ", " + result.placeName + ", " + result.stateAbbreviation + " " + result.zipCode;
+      result['id'] = encodeURI(idString.replace(/ /g, '-').replace(/\#/g, '-').replace(/\//g, '-').replace(/\./g, '-'));
+    }
       
     return result;
   },
